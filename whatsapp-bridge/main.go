@@ -208,7 +208,13 @@ type RevokeMessageRequest struct {
 	ChatJID   string `json:"chat_jid"`
 }
 
-// Function to revoke ("delete for everyone") a message we previously sent
+// Function to revoke ("delete for everyone") a message we previously sent.
+//
+// NOTE on the self-chat: your "Message yourself" chat exists under two address
+// forms. Messages the bridge sends to your own number are stored under
+// <number>@s.whatsapp.net, but the chat your phone displays is the @lid one.
+// A revoke is only honored against the @lid JID — revoking against the
+// @s.whatsapp.net form returns success but leaves the message on the phone.
 func revokeWhatsAppMessage(client *whatsmeow.Client, chatJID string, messageID string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"

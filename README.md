@@ -140,6 +140,26 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **download_media**: Download media from a WhatsApp message and get the local file path
+- **delete_message**: Revoke ("delete for everyone") a message you previously sent
+
+### Deleting messages
+
+The `delete_message` tool revokes a message via whatsmeow's `BuildRevoke`. It takes a
+`message_id` and a `chat_jid`. WhatsApp only lets you revoke **your own** messages, and
+only within its delete-for-everyone window (~2 days). `send_message` now returns the sent
+message's ID so you can revoke it later.
+
+> **Self-chat ("Message yourself") gotcha:** your self-chat exists under two address forms.
+> Messages the bridge *sends* to your own number are stored under `<number>@s.whatsapp.net`,
+> but the chat your phone actually displays is the **`@lid`** one (e.g. `…@lid`). A revoke is
+> only honored against the **`@lid`** JID — revoking against the `@s.whatsapp.net` form returns
+> success but the message stays on your phone. Use the `@lid` chat JID for self-chat deletes.
+
+> **Recovering IDs for old messages:** the bridge does **not** store messages it sent itself
+> (a device never receives an echo of its own outgoing message), so those have no local ID and
+> can't be revoked. Messages sent from your **phone** while the bridge is running are captured
+> live with their IDs. A full re-pair (fresh history sync) re-imports recent history *with IDs*,
+> which then makes those messages deletable (subject to the own-message + time-window limits).
 
 ### Media Handling Features
 

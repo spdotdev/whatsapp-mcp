@@ -254,6 +254,11 @@ def delete_message(message_id: str, chat_jid: str) -> Dict[str, Any]:
     WhatsApp only allows revoking your OWN messages, and only within its
     delete-for-everyone time window (about 2 days after sending).
 
+    Self-chat gotcha: the "Message yourself" chat has two address forms. The
+    revoke is only honored against the @lid JID (e.g. "...@lid"), NOT the
+    "<number>@s.whatsapp.net" form — the latter returns success but leaves the
+    message on your phone. Use the @lid chat_jid for self-chat deletes.
+
     Args:
         message_id: The ID of the message to delete (from list_messages)
         chat_jid: The JID of the chat the message is in (e.g. "123456789@s.whatsapp.net")
