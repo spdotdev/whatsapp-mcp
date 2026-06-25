@@ -192,7 +192,22 @@ func maybeAutoRespond(client *whatsmeow.Client, msg *events.Message, content str
 			return
 		}
 
-		reply, err := runClaude(cfg, string(sysPrompt), content)
+		// Prefix the sender so prompts can attribute/translate ("Elena said: ...").
+		who := msg.Info.PushName
+		if who == "" {
+			if msg.Info.IsFromMe {
+				who = "You"
+			} else {
+				who = "Someone"
+			}
+		}
+		owner := "no"
+		if msg.Info.IsFromMe {
+			owner = "yes"
+		}
+		userInput := fmt.Sprintf("[sender: %s] [owner: %s]\n%s", who, owner, content)
+
+		reply, err := runClaude(cfg, string(sysPrompt), userInput)
 		if err != nil {
 			fmt.Printf("[responder] %s: claude error: %v\n", chat.Label, err)
 			return
@@ -230,7 +245,22 @@ func runClaude(cfg *ResponderConfig, sysPrompt, userMsg string) (string, error) 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bin, "-p", userMsg, "--append-system-prompt", sysPrompt)
+	// Lock the headless run down so a group member can never make the bot leak
+	// the owner's data or act on their behalf:
+	//   --strict-mcp-config (with no --mcp-config): load no MCP servers, so none
+	//       of the owner's MCP tools (gmail, whatsapp, …) are reachable.
+	//   --setting-sources "": ignore user/project/local settings, so the owner's
+	//       permission allow-list and hooks don't apply to this run.
+	//   --disallowedTools: hard-block the file/exec/web tools as defense in depth.
+	cmd := exec.CommandContext(ctx, bin,
+		"-p", userMsg,
+		"--append-system-prompt", sysPrompt,
+		"--strict-mcp-config",
+		"--setting-sources", "",
+		"--disallowedTools", "Bash Read Write Edit NotebookEdit Glob Grep WebFetch WebSearch Task",
+	)
+	// Belt-and-suspenders: also disable the RMMBR briefing hook for headless runs.
+	cmd.Env = append(os.Environ(), "RMMBR_DISABLE=1")
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
