@@ -3,3 +3,6 @@ claude_desktop_config.json
 whatsapp.log
 # compiled bridge binary
 whatsapp-bridge/whatsapp-bridge
+
+# Local auto-responder config (contains personal JIDs/phone — do not commit)
+whatsapp-bridge/responder.json

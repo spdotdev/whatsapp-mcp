@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy to responder.json (gitignored) and fill in real JIDs. Inbound messages on an allowlisted chat are sent to `claude -p` with that chat's system prompt; the reply is auto-sent (unless dry_run). Edits hot-reload on save. Kill switch: `touch ~/.wa-responder-off`.",
+  "enabled": true,
+  "dry_run": true,
+  "claude_bin": "claude",
+  "timeout_seconds": 90,
+  "min_interval_seconds": 5,
+  "kill_switch_file": "~/.wa-responder-off",
+  "chats": [
+    {
+      "jid": "0000000000@s.whatsapp.net",
+      "label": "self-chat",
+      "system_prompt_file": "prompts/translate-ru-en.txt",
+      "respond_to_self": true,
+      "dry_run": false
+    },
+    {
+      "jid": "00000000000000@g.us",
+      "label": "example-group",
+      "system_prompt_file": "prompts/translate-ru-en.txt",
+      "dry_run": true
+    }
+  ]
+}

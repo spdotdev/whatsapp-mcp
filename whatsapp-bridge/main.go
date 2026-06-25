@@ -502,6 +502,9 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
 		}
 	}
+
+	// Auto-responder hook (event-driven, allowlisted, dry-run-safe; see responder.go).
+	maybeAutoRespond(client, msg, content)
 }
 
 // DownloadMediaRequest represents the request body for the download media API
