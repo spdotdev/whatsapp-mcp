@@ -12,7 +12,8 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    revoke_message as whatsapp_revoke_message
 )
 
 # Initialize FastMCP server
@@ -245,6 +246,32 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+@mcp.tool()
+def delete_message(message_id: str, chat_jid: str) -> Dict[str, Any]:
+    """Revoke ("delete for everyone") a WhatsApp message you previously sent.
+
+    WhatsApp only allows revoking your OWN messages, and only within its
+    delete-for-everyone time window (about 2 days after sending).
+
+    Args:
+        message_id: The ID of the message to delete (from list_messages)
+        chat_jid: The JID of the chat the message is in (e.g. "123456789@s.whatsapp.net")
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    if not message_id or not chat_jid:
+        return {
+            "success": False,
+            "message": "Both message_id and chat_jid must be provided"
+        }
+
+    success, status_message = whatsapp_revoke_message(message_id, chat_jid)
+    return {
+        "success": success,
+        "message": status_message
+    }
 
 if __name__ == "__main__":
     # Initialize and run the server
