@@ -9,7 +9,7 @@
 set -u
 
 SERVICE="whatsapp-bridge.service"
-BRIDGE_DIR="$HOME/whatsapp-mcp/whatsapp-bridge"
+BRIDGE_DIR="$HOME/.mcp/whatsapp-mcp/whatsapp-bridge"
 BIN="$BRIDGE_DIR/whatsapp-bridge"
 
 restart_service() {
