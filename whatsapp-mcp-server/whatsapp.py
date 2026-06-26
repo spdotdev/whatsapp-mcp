@@ -567,9 +567,17 @@ def list_calls(
             clauses.append("chat_jid = ?")
             params.append(chat_jid)
         if after:
+            try:
+                after = datetime.fromisoformat(after)
+            except ValueError:
+                raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
             clauses.append("start_time >= ?")
             params.append(after)
         if before:
+            try:
+                before = datetime.fromisoformat(before)
+            except ValueError:
+                raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
             clauses.append("start_time <= ?")
             params.append(before)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""

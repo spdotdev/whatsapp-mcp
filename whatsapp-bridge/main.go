@@ -23,6 +23,7 @@ import (
 	"bytes"
 
 	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -223,6 +224,21 @@ func callDurationSeconds(accept, end *time.Time) int {
 		return 0
 	}
 	return d
+}
+
+// callOfferType inspects the raw call-offer node to determine whether the
+// call includes video. WhatsApp signals 1:1 video offers by including a
+// child node with tag "video" inside the offer payload.
+func callOfferType(data *waBinary.Node) string {
+	if data == nil {
+		return "voice"
+	}
+	for _, child := range data.GetChildren() {
+		if child.Tag == "video" {
+			return "video"
+		}
+	}
+	return "voice"
 }
 
 // RecordCallOffer inserts a ringing call (idempotent on call id).
@@ -643,6 +659,12 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 }
 
 // handleCallOffer records an incoming/outgoing call offer.
+//
+// NOTE: Capture is effectively incoming/connected-only. whatsmeow emits
+// CallOffer only when the local device RECEIVES a ringing event from WhatsApp
+// servers — there is no equivalent server-push for calls initiated by this
+// device, so direction="outgoing" rarely fires in practice and there is no
+// retroactive call history available via this event path.
 func handleCallOffer(client *whatsmeow.Client, store *MessageStore, meta types.BasicCallMeta, callType string, logger waLog.Logger) {
 	chatJID := meta.From.String()
 	direction := "incoming"
@@ -1069,7 +1091,7 @@ func main() {
 			handleHistorySync(client, messageStore, v, logger)
 
 		case *events.CallOffer:
-			handleCallOffer(client, messageStore, v.BasicCallMeta, "voice", logger)
+			handleCallOffer(client, messageStore, v.BasicCallMeta, callOfferType(v.Data), logger)
 
 		case *events.CallOfferNotice:
 			callType := "voice"
@@ -1077,6 +1099,11 @@ func main() {
 				callType = "video"
 			}
 			handleCallOffer(client, messageStore, v.BasicCallMeta, callType, logger)
+
+		case *events.CallReject:
+			if err := messageStore.RecordCallTerminate(v.CallID, v.Timestamp, "rejected"); err != nil {
+				logger.Warnf("Failed to record call reject %s: %v", v.CallID, err)
+			}
 
 		case *events.CallAccept:
 			if err := messageStore.RecordCallAccept(v.CallID, v.Timestamp); err != nil {

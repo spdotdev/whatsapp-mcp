@@ -52,3 +52,11 @@ def test_list_calls_time_window(tmp_path):
     _seed(db)
     calls = list_calls(after="2026-06-26 08:30:00", db_path=db)
     assert [c.id for c in calls] == ["C1"]
+
+
+def test_list_calls_before_window(tmp_path):
+    db = str(tmp_path / "messages.db")
+    _seed(db)
+    # T-separated ISO-8601 bound — guards Fix 2 (datetime.fromisoformat parsing)
+    calls = list_calls(before="2026-06-26T07:30:00", db_path=db)
+    assert [c.id for c in calls] == ["C3"]
