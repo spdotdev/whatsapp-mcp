@@ -642,6 +642,20 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	maybeAutoRespond(client, msg, content)
 }
 
+// handleCallOffer records an incoming/outgoing call offer.
+func handleCallOffer(client *whatsmeow.Client, store *MessageStore, meta types.BasicCallMeta, callType string, logger waLog.Logger) {
+	chatJID := meta.From.String()
+	direction := "incoming"
+	if client.Store.ID != nil && meta.CallCreator.User == client.Store.ID.User {
+		direction = "outgoing"
+	}
+	if err := store.RecordCallOffer(meta.CallID, chatJID, meta.From.User, callType, direction, meta.Timestamp); err != nil {
+		logger.Warnf("Failed to store call offer %s: %v", meta.CallID, err)
+	} else {
+		logger.Infof("Call offer %s from %s (%s, %s)", meta.CallID, meta.From.User, callType, direction)
+	}
+}
+
 // DownloadMediaRequest represents the request body for the download media API
 type DownloadMediaRequest struct {
 	MessageID string `json:"message_id"`
@@ -1053,6 +1067,26 @@ func main() {
 		case *events.HistorySync:
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
+
+		case *events.CallOffer:
+			handleCallOffer(client, messageStore, v.BasicCallMeta, "voice", logger)
+
+		case *events.CallOfferNotice:
+			callType := "voice"
+			if strings.EqualFold(v.Media, "video") {
+				callType = "video"
+			}
+			handleCallOffer(client, messageStore, v.BasicCallMeta, callType, logger)
+
+		case *events.CallAccept:
+			if err := messageStore.RecordCallAccept(v.CallID, v.Timestamp); err != nil {
+				logger.Warnf("Failed to record call accept %s: %v", v.CallID, err)
+			}
+
+		case *events.CallTerminate:
+			if err := messageStore.RecordCallTerminate(v.CallID, v.Timestamp, v.Reason); err != nil {
+				logger.Warnf("Failed to record call terminate %s: %v", v.CallID, err)
+			}
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
