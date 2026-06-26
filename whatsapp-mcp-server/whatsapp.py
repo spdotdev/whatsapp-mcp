@@ -49,8 +49,8 @@ class Call:
     call_type: str
     direction: str
     status: str
-    start_time: datetime
-    end_time: Optional[datetime] = None
+    start_time: str
+    end_time: Optional[str] = None
     duration_seconds: int = 0
 
 @dataclass
