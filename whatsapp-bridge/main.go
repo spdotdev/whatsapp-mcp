@@ -46,27 +46,28 @@ type MessageStore struct {
 	db *sql.DB
 }
 
-// Initialize message store
+// Initialize message store at the default location
 func NewMessageStore() (*MessageStore, error) {
-	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll("store", 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
+	return newMessageStoreAt("store/messages.db")
+}
 
-	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+// newMessageStoreAt opens (and migrates) the message DB at an explicit path. Used by tests.
+func newMessageStoreAt(path string) (*MessageStore, error) {
+	db, err := sql.Open("sqlite3", "file:"+path+"?_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
 
-	// Create tables if they don't exist
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS chats (
 			jid TEXT PRIMARY KEY,
 			name TEXT,
 			last_message_time TIMESTAMP
 		);
-		
+
 		CREATE TABLE IF NOT EXISTS messages (
 			id TEXT,
 			chat_jid TEXT,
@@ -83,6 +84,19 @@ func NewMessageStore() (*MessageStore, error) {
 			file_length INTEGER,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
+		);
+
+		CREATE TABLE IF NOT EXISTS calls (
+			id TEXT PRIMARY KEY,
+			chat_jid TEXT,
+			caller TEXT,
+			call_type TEXT,
+			direction TEXT,
+			status TEXT,
+			start_time TIMESTAMP,
+			accept_time TIMESTAMP,
+			end_time TIMESTAMP,
+			duration_seconds INTEGER
 		);
 	`)
 	if err != nil {
@@ -170,6 +184,124 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	}
 
 	return chats, nil
+}
+
+// Call represents a WhatsApp voice/video call event
+type Call struct {
+	ID              string
+	ChatJID         string
+	Caller          string
+	CallType        string
+	Direction       string
+	Status          string
+	StartTime       time.Time
+	AcceptTime      *time.Time
+	EndTime         *time.Time
+	DurationSeconds int
+}
+
+// terminateStatus maps a call's answered-state + whatsmeow terminate reason to a status.
+func terminateStatus(answered bool, reason string) string {
+	if answered {
+		return "answered"
+	}
+	switch reason {
+	case "reject", "rejected":
+		return "rejected"
+	default: // "timeout", "", or anything else => never connected
+		return "missed"
+	}
+}
+
+// callDurationSeconds returns talk time in seconds, or 0 if not answered / negative.
+func callDurationSeconds(accept, end *time.Time) int {
+	if accept == nil || end == nil {
+		return 0
+	}
+	d := int(end.Sub(*accept).Seconds())
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// RecordCallOffer inserts a ringing call (idempotent on call id).
+func (store *MessageStore) RecordCallOffer(id, chatJID, caller, callType, direction string, start time.Time) error {
+	_, err := store.db.Exec(
+		`INSERT OR IGNORE INTO calls (id, chat_jid, caller, call_type, direction, status, start_time, duration_seconds)
+		 VALUES (?, ?, ?, ?, ?, 'ringing', ?, 0)`,
+		id, chatJID, caller, callType, direction, start,
+	)
+	return err
+}
+
+// RecordCallAccept marks a call answered.
+func (store *MessageStore) RecordCallAccept(id string, accept time.Time) error {
+	_, err := store.db.Exec(
+		`UPDATE calls SET status = 'answered', accept_time = ? WHERE id = ?`,
+		accept, id,
+	)
+	return err
+}
+
+// RecordCallTerminate finalizes a call: sets end time, computes status + duration.
+func (store *MessageStore) RecordCallTerminate(id string, end time.Time, reason string) error {
+	var accept sql.NullTime
+	err := store.db.QueryRow(`SELECT accept_time FROM calls WHERE id = ?`, id).Scan(&accept)
+	if err == sql.ErrNoRows {
+		// Terminate seen without an offer (e.g. bridge connected mid-call): insert a minimal row.
+		_, err = store.db.Exec(
+			`INSERT OR IGNORE INTO calls (id, chat_jid, caller, call_type, direction, status, start_time, end_time, duration_seconds)
+			 VALUES (?, '', '', 'voice', 'unknown', ?, ?, ?, 0)`,
+			id, terminateStatus(false, reason), end, end,
+		)
+		return err
+	} else if err != nil {
+		return err
+	}
+
+	var acceptPtr *time.Time
+	if accept.Valid {
+		acceptPtr = &accept.Time
+	}
+	status := terminateStatus(accept.Valid, reason)
+	dur := callDurationSeconds(acceptPtr, &end)
+	_, err = store.db.Exec(
+		`UPDATE calls SET status = ?, end_time = ?, duration_seconds = ? WHERE id = ?`,
+		status, end, dur, id,
+	)
+	return err
+}
+
+// GetCalls returns calls for a chat (most recent first).
+func (store *MessageStore) GetCalls(chatJID string, limit int) ([]Call, error) {
+	rows, err := store.db.Query(
+		`SELECT id, chat_jid, caller, call_type, direction, status, start_time, accept_time, end_time, duration_seconds
+		 FROM calls WHERE chat_jid = ? ORDER BY start_time DESC LIMIT ?`,
+		chatJID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var calls []Call
+	for rows.Next() {
+		var c Call
+		var accept, end sql.NullTime
+		if err := rows.Scan(&c.ID, &c.ChatJID, &c.Caller, &c.CallType, &c.Direction, &c.Status,
+			&c.StartTime, &accept, &end, &c.DurationSeconds); err != nil {
+			return nil, err
+		}
+		if accept.Valid {
+			c.AcceptTime = &accept.Time
+		}
+		if end.Valid {
+			c.EndTime = &end.Time
+		}
+		calls = append(calls, c)
+	}
+	return calls, nil
 }
 
 // Extract text content from a message
