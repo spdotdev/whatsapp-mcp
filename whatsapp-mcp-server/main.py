@@ -13,7 +13,8 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
-    revoke_message as whatsapp_revoke_message
+    revoke_message as whatsapp_revoke_message,
+    list_calls as whatsapp_list_calls,
 )
 
 # Initialize FastMCP server
@@ -277,6 +278,41 @@ def delete_message(message_id: str, chat_jid: str) -> Dict[str, Any]:
         "success": success,
         "message": status_message
     }
+
+@mcp.tool()
+def list_calls(
+    chat_jid: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """List WhatsApp voice/video calls (most recent first).
+
+    Args:
+        chat_jid: Optional chat JID to filter calls by chat
+        after: Optional ISO-8601 datetime; only calls started at/after this time
+        before: Optional ISO-8601 datetime; only calls started at/before this time
+        limit: Maximum number of calls to return (default 20)
+
+    Returns a list of calls with: id, chat_jid, caller, call_type (voice/video),
+    direction (incoming/outgoing), status (answered/missed/rejected/ringing),
+    start_time, end_time, duration_seconds.
+    """
+    calls = whatsapp_list_calls(chat_jid=chat_jid, after=after, before=before, limit=limit)
+    return [
+        {
+            "id": c.id,
+            "chat_jid": c.chat_jid,
+            "caller": c.caller,
+            "call_type": c.call_type,
+            "direction": c.direction,
+            "status": c.status,
+            "start_time": c.start_time,
+            "end_time": c.end_time,
+            "duration_seconds": c.duration_seconds,
+        }
+        for c in calls
+    ]
 
 if __name__ == "__main__":
     # Initialize and run the server

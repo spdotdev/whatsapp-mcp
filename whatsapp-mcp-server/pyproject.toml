@@ -9,3 +9,6 @@ dependencies = [
     "mcp[cli]>=1.6.0",
     "requests>=2.32.3",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8"]

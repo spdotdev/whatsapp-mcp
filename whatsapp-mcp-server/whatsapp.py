@@ -42,6 +42,18 @@ class Contact:
     jid: str
 
 @dataclass
+class Call:
+    id: str
+    chat_jid: str
+    caller: str
+    call_type: str
+    direction: str
+    status: str
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    duration_seconds: int = 0
+
+@dataclass
 class MessageContext:
     message: Message
     before: List[Message]
@@ -530,6 +542,57 @@ def get_last_interaction(jid: str) -> str:
     finally:
         if 'conn' in locals():
             conn.close()
+
+
+def list_calls(
+    chat_jid: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    limit: int = 20,
+    db_path: str = MESSAGES_DB_PATH,
+) -> List[Call]:
+    """List WhatsApp voice/video calls, most recent first.
+
+    Args:
+        chat_jid: optional chat JID filter
+        after / before: optional ISO-8601 datetime bounds on start_time
+        limit: max rows
+        db_path: override DB path (tests)
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        clauses, params = [], []
+        if chat_jid:
+            clauses.append("chat_jid = ?")
+            params.append(chat_jid)
+        if after:
+            clauses.append("start_time >= ?")
+            params.append(after)
+        if before:
+            clauses.append("start_time <= ?")
+            params.append(before)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        cursor.execute(
+            f"""SELECT id, chat_jid, caller, call_type, direction, status,
+                       start_time, end_time, duration_seconds
+                FROM calls {where} ORDER BY start_time DESC LIMIT ?""",
+            params,
+        )
+        calls = []
+        for row in cursor.fetchall():
+            calls.append(
+                Call(
+                    id=row[0], chat_jid=row[1], caller=row[2], call_type=row[3],
+                    direction=row[4], status=row[5],
+                    start_time=row[6], end_time=row[7],
+                    duration_seconds=row[8] or 0,
+                )
+            )
+        return calls
+    finally:
+        conn.close()
 
 
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
