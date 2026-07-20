@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -321,6 +322,477 @@ func (store *MessageStore) GetCalls(chatJID string, limit int) ([]Call, error) {
 		return nil, err
 	}
 	return calls, nil
+}
+
+// ---- JSON response types for the read API ----
+
+// ChatJSON mirrors the Python Chat dataclass shape.
+type ChatJSON struct {
+	JID             string  `json:"jid"`
+	Name            *string `json:"name"`
+	LastMessageTime *string `json:"last_message_time"`
+	LastMessage     *string `json:"last_message"`
+	LastSender      *string `json:"last_sender"`
+	LastIsFromMe    *bool   `json:"last_is_from_me"`
+}
+
+// ContactJSON mirrors the Python Contact dataclass shape (jid/name only;
+// phone_number is derived client-side from jid, same as before).
+type ContactJSON struct {
+	JID  string  `json:"jid"`
+	Name *string `json:"name"`
+}
+
+// MessageJSON mirrors the Python Message dataclass shape.
+type MessageJSON struct {
+	Timestamp string  `json:"timestamp"`
+	Sender    string  `json:"sender"`
+	ChatName  *string `json:"chat_name"`
+	Content   string  `json:"content"`
+	IsFromMe  bool    `json:"is_from_me"`
+	ChatJID   string  `json:"chat_jid"`
+	ID        string  `json:"id"`
+	MediaType *string `json:"media_type"`
+}
+
+// MessageContextJSON mirrors the Python MessageContext dataclass shape.
+type MessageContextJSON struct {
+	Message MessageJSON   `json:"message"`
+	Before  []MessageJSON `json:"before"`
+	After   []MessageJSON `json:"after"`
+}
+
+// CallJSON mirrors the Python Call dataclass shape.
+type CallJSON struct {
+	ID              string  `json:"id"`
+	ChatJID         string  `json:"chat_jid"`
+	Caller          string  `json:"caller"`
+	CallType        string  `json:"call_type"`
+	Direction       string  `json:"direction"`
+	Status          string  `json:"status"`
+	StartTime       string  `json:"start_time"`
+	EndTime         *string `json:"end_time"`
+	DurationSeconds int     `json:"duration_seconds"`
+}
+
+// timeStr formats a time.Time the same way sqlite3 already stores/returns it
+// (space-separated, no offset) so Python's datetime.fromisoformat parses it
+// identically to how it parsed raw sqlite TEXT values before this refactor.
+func timeStr(t time.Time) string {
+	return t.Format("2006-01-02 15:04:05")
+}
+
+// ListChats mirrors whatsapp.py's list_chats query exactly.
+func (store *MessageStore) ListChats(query string, limit, page int, includeLastMessage bool, sortBy string) ([]ChatJSON, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`SELECT chats.jid, chats.name, chats.last_message_time, messages.content as last_message, messages.sender as last_sender, messages.is_from_me as last_is_from_me FROM chats`)
+	if includeLastMessage {
+		sb.WriteString(` LEFT JOIN messages ON chats.jid = messages.chat_jid AND chats.last_message_time = messages.timestamp`)
+	}
+	var params []interface{}
+	if query != "" {
+		sb.WriteString(` WHERE (LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)`)
+		params = append(params, "%"+query+"%", "%"+query+"%")
+	}
+	orderBy := "chats.last_message_time DESC"
+	if sortBy != "last_active" {
+		orderBy = "chats.name"
+	}
+	sb.WriteString(" ORDER BY " + orderBy)
+	sb.WriteString(" LIMIT ? OFFSET ?")
+	offset := page * limit
+	params = append(params, limit, offset)
+
+	rows, err := store.db.Query(sb.String(), params...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanChats(rows)
+}
+
+func scanChats(rows *sql.Rows) ([]ChatJSON, error) {
+	var result []ChatJSON
+	for rows.Next() {
+		var jid string
+		var name sql.NullString
+		var lastMessageTime sql.NullTime
+		var lastMessage, lastSender sql.NullString
+		var lastIsFromMe sql.NullBool
+		if err := rows.Scan(&jid, &name, &lastMessageTime, &lastMessage, &lastSender, &lastIsFromMe); err != nil {
+			return nil, err
+		}
+		c := ChatJSON{JID: jid}
+		if name.Valid {
+			n := name.String
+			c.Name = &n
+		}
+		if lastMessageTime.Valid {
+			t := timeStr(lastMessageTime.Time)
+			c.LastMessageTime = &t
+		}
+		if lastMessage.Valid {
+			m := lastMessage.String
+			c.LastMessage = &m
+		}
+		if lastSender.Valid {
+			s := lastSender.String
+			c.LastSender = &s
+		}
+		if lastIsFromMe.Valid {
+			b := lastIsFromMe.Bool
+			c.LastIsFromMe = &b
+		}
+		result = append(result, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// GetChat mirrors whatsapp.py's get_chat query exactly.
+func (store *MessageStore) GetChat(jid string, includeLastMessage bool) (*ChatJSON, error) {
+	q := `SELECT c.jid, c.name, c.last_message_time, m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me FROM chats c`
+	if includeLastMessage {
+		q += ` LEFT JOIN messages m ON c.jid = m.chat_jid AND c.last_message_time = m.timestamp`
+	}
+	q += ` WHERE c.jid = ?`
+	rows, err := store.db.Query(q, jid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	chats, err := scanChats(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(chats) == 0 {
+		return nil, nil
+	}
+	return &chats[0], nil
+}
+
+// GetDirectChatByContact mirrors whatsapp.py's get_direct_chat_by_contact query exactly.
+func (store *MessageStore) GetDirectChatByContact(phone string) (*ChatJSON, error) {
+	rows, err := store.db.Query(`
+		SELECT c.jid, c.name, c.last_message_time, m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me
+		FROM chats c
+		LEFT JOIN messages m ON c.jid = m.chat_jid AND c.last_message_time = m.timestamp
+		WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
+		LIMIT 1`, "%"+phone+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	chats, err := scanChats(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(chats) == 0 {
+		return nil, nil
+	}
+	return &chats[0], nil
+}
+
+// SearchContacts mirrors whatsapp.py's search_contacts query exactly.
+func (store *MessageStore) SearchContacts(query string) ([]ContactJSON, error) {
+	pattern := "%" + query + "%"
+	rows, err := store.db.Query(`
+		SELECT DISTINCT jid, name FROM chats
+		WHERE (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
+		AND jid NOT LIKE '%@g.us'
+		ORDER BY name, jid
+		LIMIT 50`, pattern, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []ContactJSON
+	for rows.Next() {
+		var jid string
+		var name sql.NullString
+		if err := rows.Scan(&jid, &name); err != nil {
+			return nil, err
+		}
+		c := ContactJSON{JID: jid}
+		if name.Valid {
+			n := name.String
+			c.Name = &n
+		}
+		result = append(result, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// GetContactChats mirrors whatsapp.py's get_contact_chats query exactly.
+func (store *MessageStore) GetContactChats(jid string, limit, page int) ([]ChatJSON, error) {
+	rows, err := store.db.Query(`
+		SELECT DISTINCT c.jid, c.name, c.last_message_time, m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me
+		FROM chats c
+		JOIN messages m ON c.jid = m.chat_jid
+		WHERE m.sender = ? OR c.jid = ?
+		ORDER BY c.last_message_time DESC
+		LIMIT ? OFFSET ?`, jid, jid, limit, page*limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanChats(rows)
+}
+
+// ResolveSenderName mirrors whatsapp.py's get_sender_name lookup logic
+// (exact JID match first, then a LIKE match on the phone-number part).
+func (store *MessageStore) ResolveSenderName(senderJID string) (string, error) {
+	var name sql.NullString
+	err := store.db.QueryRow(`SELECT name FROM chats WHERE jid = ? LIMIT 1`, senderJID).Scan(&name)
+	if err != nil && err != sql.ErrNoRows {
+		return "", err
+	}
+	if err == nil && name.Valid && name.String != "" {
+		return name.String, nil
+	}
+
+	phonePart := senderJID
+	if idx := strings.Index(senderJID, "@"); idx >= 0 {
+		phonePart = senderJID[:idx]
+	}
+	err = store.db.QueryRow(`SELECT name FROM chats WHERE jid LIKE ? LIMIT 1`, "%"+phonePart+"%").Scan(&name)
+	if err != nil && err != sql.ErrNoRows {
+		return "", err
+	}
+	if err == nil && name.Valid && name.String != "" {
+		return name.String, nil
+	}
+	return senderJID, nil
+}
+
+func scanMessages(rows *sql.Rows) ([]MessageJSON, error) {
+	var result []MessageJSON
+	for rows.Next() {
+		var timestamp time.Time
+		var sender, content, chatJID, id string
+		var chatName, mediaType sql.NullString
+		var isFromMe bool
+		if err := rows.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &mediaType); err != nil {
+			return nil, err
+		}
+		m := MessageJSON{
+			Timestamp: timeStr(timestamp),
+			Sender:    sender,
+			Content:   content,
+			IsFromMe:  isFromMe,
+			ChatJID:   chatJID,
+			ID:        id,
+		}
+		if chatName.Valid {
+			n := chatName.String
+			m.ChatName = &n
+		}
+		if mediaType.Valid {
+			mt := mediaType.String
+			m.MediaType = &mt
+		}
+		result = append(result, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ListMessagesParams mirrors the filters accepted by whatsapp.py's list_messages.
+type ListMessagesParams struct {
+	After             string
+	Before            string
+	SenderPhoneNumber string
+	ChatJID           string
+	Query             string
+	Limit             int
+	Page              int
+}
+
+// ListMessages mirrors whatsapp.py's list_messages base query exactly (no context expansion).
+func (store *MessageStore) ListMessages(p ListMessagesParams) ([]MessageJSON, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages JOIN chats ON messages.chat_jid = chats.jid`)
+	var clauses []string
+	var params []interface{}
+	if p.After != "" {
+		clauses = append(clauses, "messages.timestamp > ?")
+		params = append(params, p.After)
+	}
+	if p.Before != "" {
+		clauses = append(clauses, "messages.timestamp < ?")
+		params = append(params, p.Before)
+	}
+	if p.SenderPhoneNumber != "" {
+		clauses = append(clauses, "messages.sender = ?")
+		params = append(params, p.SenderPhoneNumber)
+	}
+	if p.ChatJID != "" {
+		clauses = append(clauses, "messages.chat_jid = ?")
+		params = append(params, p.ChatJID)
+	}
+	if p.Query != "" {
+		clauses = append(clauses, "LOWER(messages.content) LIKE LOWER(?)")
+		params = append(params, "%"+p.Query+"%")
+	}
+	if len(clauses) > 0 {
+		sb.WriteString(" WHERE " + strings.Join(clauses, " AND "))
+	}
+	sb.WriteString(" ORDER BY messages.timestamp DESC LIMIT ? OFFSET ?")
+	offset := p.Page * p.Limit
+	params = append(params, p.Limit, offset)
+
+	rows, err := store.db.Query(sb.String(), params...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
+// GetMessageContext mirrors whatsapp.py's get_message_context exactly.
+func (store *MessageStore) GetMessageContext(messageID string, before, after int) (*MessageContextJSON, error) {
+	row := store.db.QueryRow(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
+		FROM messages JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.id = ?`, messageID)
+
+	var timestamp time.Time
+	var sender, content, chatJIDFromJoin, id, chatJID string
+	var chatName, mediaType sql.NullString
+	var isFromMe bool
+	if err := row.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJIDFromJoin, &id, &chatJID, &mediaType); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	target := MessageJSON{
+		Timestamp: timeStr(timestamp),
+		Sender:    sender,
+		Content:   content,
+		IsFromMe:  isFromMe,
+		ChatJID:   chatJIDFromJoin,
+		ID:        id,
+	}
+	if chatName.Valid {
+		n := chatName.String
+		target.ChatName = &n
+	}
+	if mediaType.Valid {
+		mt := mediaType.String
+		target.MediaType = &mt
+	}
+
+	beforeRows, err := store.db.Query(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+		FROM messages JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.chat_jid = ? AND messages.timestamp < ?
+		ORDER BY messages.timestamp DESC LIMIT ?`, chatJID, timestamp, before)
+	if err != nil {
+		return nil, err
+	}
+	beforeMsgs, err := scanMessages(beforeRows)
+	beforeRows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	afterRows, err := store.db.Query(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+		FROM messages JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.chat_jid = ? AND messages.timestamp > ?
+		ORDER BY messages.timestamp ASC LIMIT ?`, chatJID, timestamp, after)
+	if err != nil {
+		return nil, err
+	}
+	afterMsgs, err := scanMessages(afterRows)
+	afterRows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	return &MessageContextJSON{Message: target, Before: beforeMsgs, After: afterMsgs}, nil
+}
+
+// GetLastInteraction mirrors whatsapp.py's get_last_interaction query exactly.
+func (store *MessageStore) GetLastInteraction(jid string) (*MessageJSON, error) {
+	rows, err := store.db.Query(`
+		SELECT m.timestamp, m.sender, c.name, m.content, m.is_from_me, c.jid, m.id, m.media_type
+		FROM messages m JOIN chats c ON m.chat_jid = c.jid
+		WHERE m.sender = ? OR c.jid = ?
+		ORDER BY m.timestamp DESC LIMIT 1`, jid, jid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	msgs, err := scanMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	return &msgs[0], nil
+}
+
+// ListCallsFiltered mirrors whatsapp.py's list_calls query exactly.
+func (store *MessageStore) ListCallsFiltered(chatJID, after, before string, limit int) ([]CallJSON, error) {
+	var clauses []string
+	var params []interface{}
+	if chatJID != "" {
+		clauses = append(clauses, "chat_jid = ?")
+		params = append(params, chatJID)
+	}
+	if after != "" {
+		clauses = append(clauses, "start_time >= ?")
+		params = append(params, after)
+	}
+	if before != "" {
+		clauses = append(clauses, "start_time <= ?")
+		params = append(params, before)
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = "WHERE " + strings.Join(clauses, " AND ")
+	}
+	params = append(params, limit)
+	rows, err := store.db.Query(fmt.Sprintf(`SELECT id, chat_jid, caller, call_type, direction, status, start_time, end_time, duration_seconds FROM calls %s ORDER BY start_time DESC LIMIT ?`, where), params...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []CallJSON
+	for rows.Next() {
+		var id, chatJIDCol, caller, callType, direction, status string
+		var startTime time.Time
+		var endTime sql.NullTime
+		var durationSeconds int
+		if err := rows.Scan(&id, &chatJIDCol, &caller, &callType, &direction, &status, &startTime, &endTime, &durationSeconds); err != nil {
+			return nil, err
+		}
+		c := CallJSON{
+			ID: id, ChatJID: chatJIDCol, Caller: caller, CallType: callType,
+			Direction: direction, Status: status, StartTime: timeStr(startTime),
+			DurationSeconds: durationSeconds,
+		}
+		if endTime.Valid {
+			e := timeStr(endTime.Time)
+			c.EndTime = &e
+		}
+		result = append(result, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // Extract text content from a message
@@ -1019,8 +1491,266 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
-	// Start the server
-	serverAddr := fmt.Sprintf(":%d", port)
+	// ---- Read endpoints (GET) ----
+
+	writeJSON := func(w http.ResponseWriter, status int, v interface{}) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(v)
+	}
+
+	queryIntDefault := func(r *http.Request, key string, def int) int {
+		v := r.URL.Query().Get(key)
+		if v == "" {
+			return def
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return def
+		}
+		return n
+	}
+
+	queryBoolDefault := func(r *http.Request, key string, def bool) bool {
+		v := r.URL.Query().Get(key)
+		if v == "" {
+			return def
+		}
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return def
+		}
+		return b
+	}
+
+	// GET /api/chats?query=&limit=&page=&include_last_message=&sort_by=
+	http.HandleFunc("/api/chats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		chats, err := messageStore.ListChats(
+			q.Get("query"),
+			queryIntDefault(r, "limit", 20),
+			queryIntDefault(r, "page", 0),
+			queryBoolDefault(r, "include_last_message", true),
+			q.Get("sort_by"),
+		)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if chats == nil {
+			chats = []ChatJSON{}
+		}
+		writeJSON(w, http.StatusOK, chats)
+	})
+
+	// GET /api/chat?jid=&include_last_message=
+	http.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jid := r.URL.Query().Get("jid")
+		if jid == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		chat, err := messageStore.GetChat(jid, queryBoolDefault(r, "include_last_message", true))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if chat == nil {
+			writeJSON(w, http.StatusNotFound, nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, chat)
+	})
+
+	// GET /api/chat/direct?phone=
+	http.HandleFunc("/api/chat/direct", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		phone := r.URL.Query().Get("phone")
+		if phone == "" {
+			http.Error(w, "phone is required", http.StatusBadRequest)
+			return
+		}
+		chat, err := messageStore.GetDirectChatByContact(phone)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if chat == nil {
+			writeJSON(w, http.StatusNotFound, nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, chat)
+	})
+
+	// GET /api/contacts/search?query=
+	http.HandleFunc("/api/contacts/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		contacts, err := messageStore.SearchContacts(r.URL.Query().Get("query"))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if contacts == nil {
+			contacts = []ContactJSON{}
+		}
+		writeJSON(w, http.StatusOK, contacts)
+	})
+
+	// GET /api/contacts/chats?jid=&limit=&page=
+	http.HandleFunc("/api/contacts/chats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jid := r.URL.Query().Get("jid")
+		if jid == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		chats, err := messageStore.GetContactChats(jid, queryIntDefault(r, "limit", 20), queryIntDefault(r, "page", 0))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if chats == nil {
+			chats = []ChatJSON{}
+		}
+		writeJSON(w, http.StatusOK, chats)
+	})
+
+	// GET /api/contacts/resolve?jid=
+	http.HandleFunc("/api/contacts/resolve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jid := r.URL.Query().Get("jid")
+		if jid == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		name, err := messageStore.ResolveSenderName(jid)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"name": name})
+	})
+
+	// GET /api/messages?after=&before=&sender=&chat_jid=&query=&limit=&page=
+	http.HandleFunc("/api/messages", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		msgs, err := messageStore.ListMessages(ListMessagesParams{
+			After:             q.Get("after"),
+			Before:            q.Get("before"),
+			SenderPhoneNumber: q.Get("sender"),
+			ChatJID:           q.Get("chat_jid"),
+			Query:             q.Get("query"),
+			Limit:             queryIntDefault(r, "limit", 20),
+			Page:              queryIntDefault(r, "page", 0),
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if msgs == nil {
+			msgs = []MessageJSON{}
+		}
+		writeJSON(w, http.StatusOK, msgs)
+	})
+
+	// GET /api/messages/context?message_id=&before=&after=
+	http.HandleFunc("/api/messages/context", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		messageID := r.URL.Query().Get("message_id")
+		if messageID == "" {
+			http.Error(w, "message_id is required", http.StatusBadRequest)
+			return
+		}
+		ctx, err := messageStore.GetMessageContext(messageID, queryIntDefault(r, "before", 5), queryIntDefault(r, "after", 5))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if ctx == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("Message with ID %s not found", messageID)})
+			return
+		}
+		writeJSON(w, http.StatusOK, ctx)
+	})
+
+	// GET /api/last-interaction?jid=
+	http.HandleFunc("/api/last-interaction", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jid := r.URL.Query().Get("jid")
+		if jid == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		msg, err := messageStore.GetLastInteraction(jid)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if msg == nil {
+			writeJSON(w, http.StatusNotFound, nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, msg)
+	})
+
+	// GET /api/calls?chat_jid=&after=&before=&limit=
+	http.HandleFunc("/api/calls", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		calls, err := messageStore.ListCallsFiltered(q.Get("chat_jid"), q.Get("after"), q.Get("before"), queryIntDefault(r, "limit", 20))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if calls == nil {
+			calls = []CallJSON{}
+		}
+		writeJSON(w, http.StatusOK, calls)
+	})
+
+	// Start the server. Host/port are overridable via env vars so the bridge
+	// can be bound to loopback-only when it sits behind a reverse proxy
+	// (e.g. Caddy on a shared host where 8080 is already taken).
+	host := os.Getenv("WHATSAPP_BRIDGE_HOST")
+	if envPort := os.Getenv("WHATSAPP_BRIDGE_PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil {
+			port = p
+		}
+	}
+	serverAddr := fmt.Sprintf("%s:%d", host, port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block
@@ -1141,6 +1871,12 @@ func main() {
 			if evt.Event == "code" {
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				// Half-block QR rendering depends on the terminal/font
+				// supporting Unicode block glyphs cleanly over SSH. Also
+				// print the raw pairing string so it can be turned into a
+				// proper QR image (e.g. `qrencode`) if the terminal art
+				// looks broken/unscannable.
+				fmt.Printf("\nRaw pairing code (for qrencode etc. if the QR above doesn't scan):\n%s\n", evt.Code)
 			} else if evt.Event == "success" {
 				connected <- true
 				break
