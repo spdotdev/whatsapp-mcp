@@ -1871,6 +1871,12 @@ func main() {
 			if evt.Event == "code" {
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				// Half-block QR rendering depends on the terminal/font
+				// supporting Unicode block glyphs cleanly over SSH. Also
+				// print the raw pairing string so it can be turned into a
+				// proper QR image (e.g. `qrencode`) if the terminal art
+				// looks broken/unscannable.
+				fmt.Printf("\nRaw pairing code (for qrencode etc. if the QR above doesn't scan):\n%s\n", evt.Code)
 			} else if evt.Event == "success" {
 				connected <- true
 				break
