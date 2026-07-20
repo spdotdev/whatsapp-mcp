@@ -12,6 +12,13 @@ import audio
 # list_calls' db_path parameter). Normal reads go over the bridge's HTTP API.
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_API_BASE_URL = os.environ.get("WHATSAPP_API_BASE_URL", "http://localhost:8080/api")
+_WHATSAPP_API_USERNAME = os.environ.get("WHATSAPP_API_USERNAME")
+_WHATSAPP_API_PASSWORD = os.environ.get("WHATSAPP_API_PASSWORD")
+WHATSAPP_API_AUTH = (
+    (_WHATSAPP_API_USERNAME, _WHATSAPP_API_PASSWORD)
+    if _WHATSAPP_API_USERNAME and _WHATSAPP_API_PASSWORD
+    else None
+)
 
 @dataclass
 class Message:
@@ -97,7 +104,7 @@ def _chat_from_json(data: dict) -> Chat:
 
 def get_sender_name(sender_jid: str) -> str:
     try:
-        response = requests.get(f"{WHATSAPP_API_BASE_URL}/contacts/resolve", params={"jid": sender_jid})
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/contacts/resolve", params={"jid": sender_jid}, auth=WHATSAPP_API_AUTH)
         if response.status_code == 200:
             return response.json().get("name") or sender_jid
         return sender_jid
@@ -172,7 +179,7 @@ def list_messages(
         if query:
             params["query"] = query
 
-        response = requests.get(f"{WHATSAPP_API_BASE_URL}/messages", params=params)
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/messages", params=params, auth=WHATSAPP_API_AUTH)
         response.raise_for_status()
         result = [_message_from_json(msg) for msg in response.json()]
 
@@ -205,6 +212,7 @@ def get_message_context(
         response = requests.get(
             f"{WHATSAPP_API_BASE_URL}/messages/context",
             params={"message_id": message_id, "before": before, "after": after},
+            auth=WHATSAPP_API_AUTH
         )
         if response.status_code == 404:
             raise ValueError(f"Message with ID {message_id} not found")
@@ -240,7 +248,7 @@ def list_chats(
         if query:
             params["query"] = query
 
-        response = requests.get(f"{WHATSAPP_API_BASE_URL}/chats", params=params)
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/chats", params=params, auth=WHATSAPP_API_AUTH)
         response.raise_for_status()
         return [_chat_from_json(c) for c in response.json()]
 
@@ -252,7 +260,7 @@ def list_chats(
 def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
-        response = requests.get(f"{WHATSAPP_API_BASE_URL}/contacts/search", params={"query": query})
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/contacts/search", params={"query": query}, auth=WHATSAPP_API_AUTH)
         response.raise_for_status()
 
         result = []
@@ -284,6 +292,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         response = requests.get(
             f"{WHATSAPP_API_BASE_URL}/contacts/chats",
             params={"jid": jid, "limit": limit, "page": page},
+            auth=WHATSAPP_API_AUTH
         )
         response.raise_for_status()
         return [_chat_from_json(c) for c in response.json()]
@@ -296,7 +305,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
 def get_last_interaction(jid: str) -> str:
     """Get most recent message involving the contact."""
     try:
-        response = requests.get(f"{WHATSAPP_API_BASE_URL}/last-interaction", params={"jid": jid})
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/last-interaction", params={"jid": jid}, auth=WHATSAPP_API_AUTH)
         if response.status_code == 404:
             return None
         response.raise_for_status()
@@ -385,7 +394,7 @@ def list_calls(
         except ValueError:
             raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
 
-    response = requests.get(f"{WHATSAPP_API_BASE_URL}/calls", params=params)
+    response = requests.get(f"{WHATSAPP_API_BASE_URL}/calls", params=params, auth=WHATSAPP_API_AUTH)
     response.raise_for_status()
     calls = []
     for row in response.json():
@@ -406,6 +415,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
         response = requests.get(
             f"{WHATSAPP_API_BASE_URL}/chat",
             params={"jid": chat_jid, "include_last_message": str(include_last_message).lower()},
+            auth=WHATSAPP_API_AUTH
         )
         if response.status_code == 404:
             return None
@@ -420,7 +430,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     """Get chat metadata by sender phone number."""
     try:
-        response = requests.get(f"{WHATSAPP_API_BASE_URL}/chat/direct", params={"phone": sender_phone_number})
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/chat/direct", params={"phone": sender_phone_number}, auth=WHATSAPP_API_AUTH)
         if response.status_code == 404:
             return None
         response.raise_for_status()
@@ -442,7 +452,7 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
             "message": message,
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, auth=WHATSAPP_API_AUTH)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -476,7 +486,7 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
             "media_path": media_path
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, auth=WHATSAPP_API_AUTH)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -516,7 +526,7 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
             "media_path": media_path
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, auth=WHATSAPP_API_AUTH)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -549,7 +559,7 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             "chat_jid": chat_jid
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, auth=WHATSAPP_API_AUTH)
         
         if response.status_code == 200:
             result = response.json()
@@ -596,7 +606,7 @@ def revoke_message(message_id: str, chat_jid: str) -> Tuple[bool, str]:
             "chat_jid": chat_jid,
         }
 
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, auth=WHATSAPP_API_AUTH)
 
         if response.status_code == 200:
             result = response.json()
