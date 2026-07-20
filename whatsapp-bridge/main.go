@@ -1741,8 +1741,16 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		writeJSON(w, http.StatusOK, calls)
 	})
 
-	// Start the server
-	serverAddr := fmt.Sprintf(":%d", port)
+	// Start the server. Host/port are overridable via env vars so the bridge
+	// can be bound to loopback-only when it sits behind a reverse proxy
+	// (e.g. Caddy on a shared host where 8080 is already taken).
+	host := os.Getenv("WHATSAPP_BRIDGE_HOST")
+	if envPort := os.Getenv("WHATSAPP_BRIDGE_PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil {
+			port = p
+		}
+	}
+	serverAddr := fmt.Sprintf("%s:%d", host, port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block
