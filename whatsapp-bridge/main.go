@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1028,6 +1029,17 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	return true, fmt.Sprintf("Message sent to %s (ID: %s)", recipient, resp.ID)
 }
 
+var unsafeFilenameChars = regexp.MustCompile(`[^A-Za-z0-9_-]`)
+
+// sanitizeMessageIDForFilename strips everything except alphanumerics/underscore/hyphen
+// so a messageID can never inject path separators (e.g. "../") or other unsafe
+// characters into a filename built from it. WhatsApp message IDs are normally
+// alphanumeric, but the ID travels in from message metadata rather than input we
+// generate ourselves, so it must not be trusted verbatim in a filesystem path.
+func sanitizeMessageIDForFilename(messageID string) string {
+	return unsafeFilenameChars.ReplaceAllString(messageID, "")
+}
+
 // Extract media info from a message
 //
 // filename is keyed on messageID (not just a second-granularity timestamp) because
@@ -1038,22 +1050,23 @@ func extractMediaInfo(msg *waProto.Message, messageID string) (mediaType string,
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
+	safeID := sanitizeMessageIDForFilename(messageID)
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + messageID + ".jpg",
+		return "image", "image_" + safeID + ".jpg",
 			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + messageID + ".mp4",
+		return "video", "video_" + safeID + ".mp4",
 			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + messageID + ".ogg",
+		return "audio", "audio_" + safeID + ".ogg",
 			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 
@@ -1061,7 +1074,7 @@ func extractMediaInfo(msg *waProto.Message, messageID string) (mediaType string,
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		filename := doc.GetFileName()
 		if filename == "" {
-			filename = "document_" + messageID
+			filename = "document_" + safeID
 		}
 		return "document", filename,
 			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
@@ -1275,8 +1288,11 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
 	}
 
-	// Generate a local path for the file
-	localPath = fmt.Sprintf("%s/%s", chatDir, filename)
+	// Generate a local path for the file. filepath.Base strips any directory
+	// components so a filename (which can come from attacker-controlled document
+	// message metadata, or from data stored before the extractMediaInfo sanitization
+	// fix) can never escape chatDir via "../" traversal.
+	localPath = fmt.Sprintf("%s/%s", chatDir, filepath.Base(filename))
 
 	// Get absolute path
 	absPath, err := filepath.Abs(localPath)
