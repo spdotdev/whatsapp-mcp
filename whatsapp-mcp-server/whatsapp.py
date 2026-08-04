@@ -222,8 +222,8 @@ def get_message_context(
 
         return MessageContext(
             message=_message_from_json(data["message"]),
-            before=[_message_from_json(m) for m in data["before"]],
-            after=[_message_from_json(m) for m in data["after"]],
+            before=[_message_from_json(m) for m in data["before"] or []],
+            after=[_message_from_json(m) for m in data["after"] or []],
         )
 
     except requests.RequestException as e:

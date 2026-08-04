@@ -386,9 +386,11 @@ func timeStr(t time.Time) string {
 // ListChats mirrors whatsapp.py's list_chats query exactly.
 func (store *MessageStore) ListChats(query string, limit, page int, includeLastMessage bool, sortBy string) ([]ChatJSON, error) {
 	sb := strings.Builder{}
-	sb.WriteString(`SELECT chats.jid, chats.name, chats.last_message_time, messages.content as last_message, messages.sender as last_sender, messages.is_from_me as last_is_from_me FROM chats`)
 	if includeLastMessage {
+		sb.WriteString(`SELECT chats.jid, chats.name, chats.last_message_time, messages.content as last_message, messages.sender as last_sender, messages.is_from_me as last_is_from_me FROM chats`)
 		sb.WriteString(` LEFT JOIN messages ON chats.jid = messages.chat_jid AND chats.last_message_time = messages.timestamp`)
+	} else {
+		sb.WriteString(`SELECT chats.jid, chats.name, chats.last_message_time, NULL as last_message, NULL as last_sender, NULL as last_is_from_me FROM chats`)
 	}
 	var params []interface{}
 	if query != "" {
@@ -457,6 +459,8 @@ func (store *MessageStore) GetChat(jid string, includeLastMessage bool) (*ChatJS
 	q := `SELECT c.jid, c.name, c.last_message_time, m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me FROM chats c`
 	if includeLastMessage {
 		q += ` LEFT JOIN messages m ON c.jid = m.chat_jid AND c.last_message_time = m.timestamp`
+	} else {
+		q = `SELECT c.jid, c.name, c.last_message_time, NULL as last_message, NULL as last_sender, NULL as last_is_from_me FROM chats c`
 	}
 	q += ` WHERE c.jid = ?`
 	rows, err := store.db.Query(q, jid)
@@ -720,6 +724,12 @@ func (store *MessageStore) GetMessageContext(messageID string, before, after int
 		return nil, err
 	}
 
+	if beforeMsgs == nil {
+		beforeMsgs = []MessageJSON{}
+	}
+	if afterMsgs == nil {
+		afterMsgs = []MessageJSON{}
+	}
 	return &MessageContextJSON{Message: target, Before: beforeMsgs, After: afterMsgs}, nil
 }
 
