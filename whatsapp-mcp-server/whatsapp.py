@@ -441,7 +441,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         print(f"Database error: {e}")
         return None
 
-def send_message(recipient: str, message: str, mentions: Optional[List[str]] = None) -> Tuple[bool, str]:
+def send_message(recipient: str, message: str, mentions: Optional[List[str]] = None, reply_to: Optional[str] = None) -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -454,6 +454,8 @@ def send_message(recipient: str, message: str, mentions: Optional[List[str]] = N
         }
         if mentions:
             payload["mentions"] = mentions
+        if reply_to:
+            payload["reply_to"] = reply_to
         
         response = requests.post(url, json=payload, auth=WHATSAPP_API_AUTH)
         

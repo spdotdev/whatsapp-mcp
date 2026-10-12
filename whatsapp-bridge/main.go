@@ -845,6 +845,9 @@ type SendMessageRequest struct {
 	// Mentions are phone numbers or JIDs of people to really mention (notification + their name).
 	// The message must contain "@<the same number>" where each person should appear. See mentions.go.
 	Mentions []string `json:"mentions,omitempty"`
+	// ReplyTo is the id of a message in the same chat to quote, so the new message is a real WhatsApp
+	// reply linked to it. The message must be in the local message store. See reply.go.
+	ReplyTo string `json:"reply_to,omitempty"`
 }
 
 // RevokeMessageRequest represents the request body for revoking (deleting) a message
@@ -881,7 +884,7 @@ func revokeWhatsAppMessage(client *whatsmeow.Client, chatJID string, messageID s
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, mentions []string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, store *MessageStore, recipient string, message string, mediaPath string, mentions []string, replyTo string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -1035,24 +1038,40 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 				FileLength:    &resp.FileLength,
 			}
 		}
-	} else if len(mentions) > 0 {
-		// A real mention needs an ExtendedTextMessage with the mentioned JIDs (see mentions.go).
+	} else if len(mentions) > 0 || replyTo != "" {
+		// A real mention or a reply needs an ExtendedTextMessage with a ContextInfo (see mentions.go and reply.go).
 		// In a group the people are looked up first, because WhatsApp addresses them by LID there.
 		var participants []types.GroupParticipant
 		if recipientJID.Server == types.GroupServer {
 			info, err := client.GetGroupInfo(context.Background(), recipientJID)
 			if err != nil {
-				return false, fmt.Sprintf("Error reading group members for the mention: %v", err)
+				return false, fmt.Sprintf("Error reading group members for the mention or reply: %v", err)
 			}
 			participants = info.Participants
 		}
-		text, jids, err := applyMentions(message, mentions, participants)
-		if err != nil {
-			return false, fmt.Sprintf("Mention error: %v", err)
+		text := message
+		ctxInfo := &waProto.ContextInfo{}
+		if len(mentions) > 0 {
+			var jids []string
+			var err error
+			text, jids, err = applyMentions(message, mentions, participants)
+			if err != nil {
+				return false, fmt.Sprintf("Mention error: %v", err)
+			}
+			ctxInfo.MentionedJID = jids
+		}
+		if replyTo != "" {
+			var own types.JID
+			if client.Store.ID != nil {
+				own = client.Store.ID.ToNonAD()
+			}
+			if err := applyReply(ctxInfo, store, replyTo, recipientJID, own, participants); err != nil {
+				return false, fmt.Sprintf("Reply error: %v", err)
+			}
 		}
 		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
 			Text:        proto.String(text),
-			ContextInfo: &waProto.ContextInfo{MentionedJID: jids},
+			ContextInfo: ctxInfo,
 		}
 	} else {
 		msg.Conversation = proto.String(message)
@@ -1513,7 +1532,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath, req.Mentions)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath, req.Mentions, req.ReplyTo)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

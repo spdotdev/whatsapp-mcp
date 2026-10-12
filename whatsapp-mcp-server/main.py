@@ -160,7 +160,8 @@ def get_message_context(
 def send_message(
     recipient: str,
     message: str,
-    mentions: Optional[List[str]] = None
+    mentions: Optional[List[str]] = None,
+    reply_to: Optional[str] = None
 ) -> Dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -174,6 +175,8 @@ def send_message(
                  e.g. message "@31651053590 can you check this?" with mentions ["31651053590"]. In groups either
                  the phone number or the long internal number (LID) works. Typing "@Alex" without this list
                  is only plain text and does not mention anyone.
+        reply_to: Optional id of a message in the same chat to reply to. The sent message is then a real
+                 WhatsApp reply, linked to (and quoting) that message. Get the id from list_messages.
     
     Returns:
         A dictionary containing success status and a status message
@@ -186,7 +189,7 @@ def send_message(
         }
     
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message, mentions)
+    success, status_message = whatsapp_send_message(recipient, message, mentions, reply_to)
     return {
         "success": success,
         "message": status_message
