@@ -842,6 +842,9 @@ type SendMessageRequest struct {
 	Recipient string `json:"recipient"`
 	Message   string `json:"message"`
 	MediaPath string `json:"media_path,omitempty"`
+	// Mentions are phone numbers or JIDs of people to really mention (notification + their name).
+	// The message must contain "@<the same number>" where each person should appear. See mentions.go.
+	Mentions []string `json:"mentions,omitempty"`
 }
 
 // RevokeMessageRequest represents the request body for revoking (deleting) a message
@@ -878,7 +881,7 @@ func revokeWhatsAppMessage(client *whatsmeow.Client, chatJID string, messageID s
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -1031,6 +1034,25 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
 			}
+		}
+	} else if len(mentions) > 0 {
+		// A real mention needs an ExtendedTextMessage with the mentioned JIDs (see mentions.go).
+		// In a group the people are looked up first, because WhatsApp addresses them by LID there.
+		var participants []types.GroupParticipant
+		if recipientJID.Server == types.GroupServer {
+			info, err := client.GetGroupInfo(context.Background(), recipientJID)
+			if err != nil {
+				return false, fmt.Sprintf("Error reading group members for the mention: %v", err)
+			}
+			participants = info.Participants
+		}
+		text, jids, err := applyMentions(message, mentions, participants)
+		if err != nil {
+			return false, fmt.Sprintf("Mention error: %v", err)
+		}
+		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+			Text:        proto.String(text),
+			ContextInfo: &waProto.ContextInfo{MentionedJID: jids},
 		}
 	} else {
 		msg.Conversation = proto.String(message)
@@ -1491,7 +1513,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath, req.Mentions)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
