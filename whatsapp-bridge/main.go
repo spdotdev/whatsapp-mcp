@@ -960,7 +960,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, store *MessageStore, recipien
 		// Document types (for any other file type)
 		default:
 			mediaType = whatsmeow.MediaDocument
-			mimeType = "application/octet-stream"
+			mimeType = documentMimeType(mediaPath)
 		}
 
 		// Upload media to WhatsApp servers
@@ -1028,6 +1028,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, store *MessageStore, recipien
 		case whatsmeow.MediaDocument:
 			msg.DocumentMessage = &waProto.DocumentMessage{
 				Title:         proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
+				FileName:      proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
